@@ -1,0 +1,293 @@
+name: 发布
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要发布的 tag，例如 v1.0.0"
+        required: true
+
+permissions:
+  contents: write   # 建 Release 需要
+
+env:
+  # windows-latest 的控制台代码页是 cp1252，print 中文直接
+  # UnicodeEncodeError: 'charmap' codec can't encode characters。
+  # 本地终端是 UTF-8 所以看不出来，但 CI 必挂——测试连第一行标题
+  # 都打不出来，exit 1。整个 release 挂在这一步。
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # 必须和 build.py 用同一个解释器。缺 PySide6 会打出没有 Qt
+      # 插件的坏包，症状是双击就闪退。
+      - name: 安装打包依赖
+        run: pip install PySide6 pyinstaller
+
+      - name: 跑测试
+        run: |
+          python tests/run_tests.py
+          python tests/test_qt_ui.py
+          python tests/test_qt_window.py
+          # 装包脚本的静态检查放在这里而不是「编译安装包」那步：
+          # 编译要等签名跑完（约 2 分钟），而指令名写错、重复这类
+          # 错误在测试阶段就能查出来。放到签名之后才查的话，每轮都要白等
+          # 一次完整发布。
+          python tools/check_iss.py
+        env:
+          PYTHONIOENCODING: utf-8
+
+      - name: 打包 exe
+        run: python build.py --clean
+
+      # ── 代码签名（自签证书）────────────────────────────────────
+      # 逻辑在 tools/sign-exe.ps1，与 ci.yml 的 build job 共用同一份。
+      #
+      # **只在打 tag 时签**：日常 CI 产出的中间产物没有签名意义，
+      # 也省掉每次构建都做一次签名的时间。
+      #
+      # **没证书就跳过，不让发布失败**——签名是增强项不是前置条件。
+      #
+      # 需要在 Settings → Secrets and variables → Actions 里配置：
+      #   NETDIAG_PFX_BASE64    base64 编码的 .pfx（自签证书）
+      #   NETDIAG_PFX_PASSWORD  导出 .pfx 时设的口令
+      #
+      # 证书本体和口令只在 Secrets 里，日志绝不输出。本地不需要证书。
+      - name: 签名 exe（自签证书）
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          NETDIAG_PFX_BASE64: ${{ secrets.NETDIAG_PFX_BASE64 }}
+          NETDIAG_PFX_PASSWORD: ${{ secrets.NETDIAG_PFX_PASSWORD }}
+        # 显式绕过执行策略。本地实测踩过：直接调 .ps1 会报
+        # PSSecurityException「系统已禁止运行此脚本」——Windows 默认的
+        # Restricted 策略会拦下未签名脚本。Actions 的 runner 默认宽松，
+        # 但写出来才不依赖 runner 环境的差异。只作用于这一条命令。
+        run: >
+          pwsh -NoProfile -ExecutionPolicy Bypass
+          -File ./tools/sign-exe.ps1
+          -Target "dist\aicbbuu-network-tools.exe"
+
+      - name: 验证 exe 能启动
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist\\aicbbuu-network-tools.exe" -PassThru
+          Start-Sleep -Seconds 12
+          if ($p.HasExited) {
+            Write-Error "exe 启动后立刻退出，退出码 $($p.ExitCode)"
+            if (Test-Path error.log) { Get-Content error.log }
+            exit 1
+          }
+          Stop-Process -Id $p.Id
+          Write-Output "exe 启动正常"
+
+      # ── 安装包（Inno Setup）─────────────────────────────────────
+      # 免安装 exe 与安装版**并存**：Release 页同时给两个资产。
+      # 喜欢绿色便携的下 exe；想进开始菜单、桌面和「应用和功能」
+      # 的下安装包。两者内容完全一致，只是安装版多了快捷方式、
+      # 卸载项和注册表信息。
+      #
+      # 必须在**签名之后**做：安装包要把已签名的 exe 打进去，否则
+      # 装完的 exe 是没签名的，SmartScreen 会直接拦。
+      #
+      # Inno Setup 选它而不是 NSIS：windows-latest runner 可以直接
+      # `choco install innosetup`，NSIS 得自己下 zip 找 nsis.exe。
+      - name: 安装 Inno Setup
+        run: choco install innosetup -y
+
+      # 简体中文字典**不在 choco 包里**。Inno Setup 官方发行版把非官方
+      # 翻译单独放在 GitHub 仓库的 Files/Languages/Unofficial/，choco
+      # 的 innosetup 包只带官方语言，于是
+      # compiler:Languages\ChineseSimplified.isl 找不到文件，ISCC 直接报错。
+      #
+      # compiler: 前缀的含义是「从编译器目录找」，所以目标必须是 Inno
+      # Setup 安装目录下的 Languages\，不能放在仓库里。
+      - name: 准备简体中文字典
+        shell: pwsh
+        run: |
+          # **不能用 "C:\Program Files*\Inno Setup*\ISCC.exe" 这种通配。**
+          # PowerShell 的 -Path 参数要求路径里不能有裸通配符片段，
+          # 会报 "Second path fragment must not be a drive or UNC name"。
+          # 正确做法是用 -Filter（-Filter 的模式可以带通配符）或
+          # 逐级上溯。
+          $exe = $null
+          foreach ($base in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+            if (-not $base) { continue }
+            $hit = Get-ChildItem -Path $base -Directory -Filter "Inno Setup*" `
+                   -ErrorAction SilentlyContinue |
+                   ForEach-Object { Join-Path $_.FullName "ISCC.exe" } |
+                   Where-Object { Test-Path $_ } |
+                   Select-Object -First 1
+            if ($hit) { $exe = $hit; break }
+          }
+          if (-not $exe) {
+            $exe = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source
+          }
+          if (-not $exe) { Write-Error "找不到 ISCC.exe"; exit 1 }
+          # Inno Setup 目录 = ISCC.exe 所在目录，不要再上溯一级
+          # （上一版写了两层 Parent，结果指向 Program Files 本身）
+          $root = Split-Path -Parent $exe
+          $langDir = Join-Path $root "Languages"
+          New-Item -ItemType Directory -Force -Path $langDir | Out-Null
+          $dst = Join-Path $langDir "ChineseSimplified.isl"
+          # **必须用发布分支 is-6_x_0，不能用 main。**
+          # main 是开发分支，Files/ 目录里还没有编译产物，
+          # raw.githubusercontent.com 直接返回 404 Not Found。
+          # is-6_5_0 是与 CI 上的 Inno Setup 6.7.x 同一代的发布分支。
+          $uri = "https://raw.githubusercontent.com/jrsoftware/issrc/is-6_5_0/Files/Languages/Unofficial/ChineseSimplified.isl"
+          Invoke-WebRequest -UseBasicParsing -Uri $uri -OutFile $dst
+          # 下载失败时 Invoke-WebRequest 会抛异常，但 out 文件可能已
+          # 留下一个 0 字节的残骸——显式验一次，别让 ISCC 去报
+          # 一个更难懂的错。
+          if ((Get-Item $dst).Length -lt 1000) {
+            Write-Error "下载的 .isl 只有 $((Get-Item $dst).Length) 字节，明显不完整"
+            exit 1
+          }
+          Write-Output "downloaded -> $dst"
+          Get-Item $dst | Select-Object Name, Length
+
+      - name: 编译安装包
+        shell: pwsh
+        run: |
+          # .iss 里写死的是 artifacts\publish\win-x64\，把 dist
+          # 里的已签名 exe 放过去。Inno Setup 的 [Files] 找不到源
+          # 文件时会报「找不到文件」并停在编译阶段，不会产出坏包。
+          New-Item -ItemType Directory -Force -Path artifacts\publish\win-x64 | Out-Null
+          Copy-Item "dist\aicbbuu-network-tools.exe" "artifacts\publish\win-x64\"
+          $iscc = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) {
+            $iscc = Get-ChildItem "C:\Program Files*\Inno Setup*\ISCC.exe" `
+                    -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (-not $iscc) { Write-Error "找不到 ISCC.exe，Inno Setup 没装成功"; exit 1 }
+          Write-Output "ISCC: $iscc"
+          & $iscc "packaging\netdiag.iss"
+          if ($LASTEXITCODE -ne 0) { Write-Error "安装包编译失败"; exit 1 }
+          Get-ChildItem artifacts\installer\*.exe | Select-Object Name, Length
+
+      # 给安装包本身签名。
+      #
+      # **为什么必须单独签**：双击安装包时，Windows 检查的是
+      # **安装包文件**的签名，不是里面那个 exe 的。里面嵌的 exe
+      # 签了也一样——安装包自己没签名，SmartScreen 照样先弹黄色
+      # 警告，用户要点「更多信息 → 仍要运行」才能装。
+      #
+      # Inno Setup 生成的 Setup.exe 是普通 PE，signtool 能直接签，
+      # 不需要额外的插件。
+      - name: 签名安装包
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          NETDIAG_PFX_BASE64: ${{ secrets.NETDIAG_PFX_BASE64 }}
+          NETDIAG_PFX_PASSWORD: ${{ secrets.NETDIAG_PFX_PASSWORD }}
+        # **用 `>` 折叠成一行，不要用 `|`。** 写成多行时 PowerShell
+        # 会把第一行的 `pwsh` 当命令名、后两行的 `-File` / `-Target`
+        # 当普通参数传给 pwsh 自己，最终报
+        # 「The term '-File' is not recognized as a name of a cmdlet」。
+        # 上面签 exe 那步用的是折叠写法，这里必须一致。
+        run: >
+          pwsh -NoProfile -ExecutionPolicy Bypass
+          -File ./tools/sign-exe.ps1
+          -Target (Get-ChildItem artifacts\installer\*.exe | Select-Object -First 1 -ExpandProperty FullName)
+        # 没证书时 sign-exe.ps1 自己会跳过并继续，不阻塞发布
+
+      # 免安装 exe 重命名成带版本号的形式，和安装包对齐。
+      # 绿 exe 名字里没版本，下完存成「aicbbuu-network-tools.exe」，
+      # 三个版本并存时根本分不清哪个新——用户下错版本还找不到原因。
+      - name: 给免安装 exe 加版本号文件名
+        shell: pwsh
+        run: |
+          $ver = "${{ github.event.inputs.tag || github.ref_name }}" -replace '^v',''
+          $new = "dist/aicbbuu-network-tools-$ver-win-x64.exe"
+          Move-Item "dist\aicbbuu-network-tools.exe" $new -Force
+          # SHA256SUMS.txt 里记的还是旧名，重算一遍。
+          #
+          # **格式必须是标准的「哈希 + 两个空格 + 文件名」**，不能夹
+          # 私有的 "SHA256" 中缀。sha256sum / shasum 的 -c 只认这个
+          # 格式，夹了中缀它们会报 "no properly formatted SHA256
+          # checksum lines found"——拿到文件想自己验一把的人会发现工具
+          # 不认，等于没给。哈希值对、格式不对，这份文件同样是废的。
+          $files = @($new) + @(Get-ChildItem artifacts\installer\*.exe).FullName
+          $lines = $files | ForEach-Object {
+            $name = Split-Path $_ -Leaf
+            $h = (Get-FileHash $_ -Algorithm SHA256).Hash.ToLower()
+            "$h  $name"          # 两空格 = 文本模式，兼容 Windows
+          }
+          # **换行符必须是 LF，不能是 CRLF；也不能有 BOM。**
+          #
+          # Out-File -Encoding utf8 在 Windows 上写出CRLF + BOM：
+          #   · LF 给Linux/macOS 用户的 sha256sum -c / shasum -a 256 -c
+          #   · BOM 让 PowerShell 5.1 和部分工具把首行哈希读成乱码
+          # 两者都表现为「哈希值明明对，工具却报 FAILED / 找不到文件」——
+          # 因为 \r 成了文件名的一部分（"xxx.exe\r"）。
+          #
+          # 所以这里不走 Out-File，用 .NET 显式指定 LF + 无 BOM。
+          [System.IO.File]::WriteAllText(
+            "dist\SHA256SUMS.txt",
+            ($lines -join "`n") + "`n",
+            (New-Object System.Text.UTF8Encoding $false))
+          Get-Content dist\SHA256SUMS.txt
+
+      - name: 建 Release 并上传
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: ${{ github.event.inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/aicbbuu-network-tools-*-win-x64.exe
+            artifacts/installer/*.exe
+            dist/SHA256SUMS.txt
+          body: |
+            ## 下载
+
+            两种包任选，**内容完全一样**：
+
+            | 文件 | 适合谁 |
+            |---|---|
+            | `aicbbuu-network-tools-<版本>-win-x64.exe` | 想直接双击就跑、不想在系统里留东西（U 盘、公司电脑、试用） |
+            | `aicbbuu-network-tools-Setup-*-win-x64.exe` | 想装到开始菜单和桌面、能从「应用和功能」里卸载 |
+
+            **都不需要安装任何运行时。** 体积约 44 MB，其中大部分是
+            Qt 运行时，已经全部静态打包进去了，目标机不用装 Python、
+            Qt 或任何其他东西（Windows 10 / 11 均可）。
+
+            安装包默认装到用户目录（不需要管理员权限），会创建开始
+            菜单快捷方式；桌面快捷方式和开机自启是可选项，安装时勾。
+
+            ## 校验
+
+            ```powershell
+            Get-FileHash aicbbuu-network-tools-<版本>-win-x64.exe -Algorithm SHA256
+            ```
+
+            应与 `SHA256SUMS.txt` 一致（里面列了两个包的校验和）。
+
+            ## 数字签名
+
+            本 exe 用**自签证书**签名。文件确实带数字签名，完整性和
+            来源可校验；但 Windows 会显示「**未知发布者**」——自签证书
+            不在系统受信任根列表里，这是预期行为。
+
+            想让它显示为「已验证的发布者」，需要把签名者证书导入
+            Windows 的「受信任的根证书颁发机构」。
+
+            ## 关于杀毒软件误报
+
+            PyInstaller 打包的程序会先把自己解压到临时目录再运行，
+            行为特征接近常见木马，因此未签名的自打包 exe 被 Defender
+            误报是**普遍现象**，与代码无关。
+
+            想确认文件确实来自本项目，请用上面的 SHA256 比对。

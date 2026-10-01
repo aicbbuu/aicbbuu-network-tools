@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+*.spec
+
+# 打包产物
+dist/*.exe
+
+# 测试与工具
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# 系统
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# 运行时产物
+error.log
+
+# 审查时实测 git check-ignore 发现漏掉的：
+venv/        # 虚拟环境
+.venv/       # 虚拟环境
+env/         # 虚拟环境
+.env         # 环境变量
+*.log        # 日志（此前只忽略了 error.log 一个）
+
+# ── 私钥与证书（绝不能进仓库）────────────────────────────────
+# 用 git check-ignore -v 实测确认过：这些之前**一条都没有**，
+# 而 tools/make-selfsigned-cert.md 里已经写了「已忽略」——
+# 文档说谎的典型。证书生成脚本一旦在项目目录里跑，.pfx 会被
+# git add -A 直接带进历史。
+*.pfx
+*.p12
+*.pem
+*.key
+*.cer
+*.crt
+*.jks
+*.keystore
+
+# 存私钥 base64 的中间文件。文档里让用户写到 ~/certs/，但得防着
+# 有人图省事直接丢在项目根目录。
+pfx-base64.txt
+*pfx*.txt
+*base64*.txt
+*signing*.txt

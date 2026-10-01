@@ -1,0 +1,22 @@
+# 默认按文本处理，并在 diff 中显示
+* text=auto
+
+# Python 源码用 LF
+*.py text eol=lf
+
+# 文档和配置用 LF
+*.md text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+.gitignore text eol=lf
+LICENSE text eol=lf
+
+# Windows 批处理必须用 CRLF，否则 cmd.exe 无法正确解析
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制文件不做任何转换
+*.ico binary
+*.png binary
+*.exe binary

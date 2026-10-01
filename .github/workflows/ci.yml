@@ -1,0 +1,151 @@
+name: 测试
+
+on:
+  push:
+    # 必须是 master —— 仓库默认分支是 master。写 [main] 的话
+    # push 永远不会触发 CI，只在开 PR 时才跑，等于形同虚设。
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # 只保留 Windows 和 Linux。macOS 是**无效覆盖**：本项目是
+        # Windows 专用工具，probes.py 在非 Windows 跑 ifconfig、
+        # probes_ext 直接 return，netstat 语法也不同——测出来是假绿，
+        # 只会给人「三个平台都验证过了」的错误印象。
+        # 刻意用**纯 include** 而不是 `os: [a, b]` + include。
+        # 两种写法在 Actions 里都合法，但后者依赖「include 里的键组合
+        # 与已有矩阵行匹配时是扩展而非新增」这条隐式规则，读的人
+        # 得查文档才敢确认。纯 include 只有一种解释。
+        #
+        # Windows runner 有真实显示环境，Qt 用默认 windows 插件；
+        # Linux 必须走 offscreen。按平台取值靠矩阵变量而不是表达式，
+        # 原因见下方 env 处的注释。
+        include:
+          - os: windows-latest
+            qt_platform: windows
+          - os: ubuntu-latest
+            qt_platform: offscreen
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Linux 上跑 Qt 需要系统库；Windows 和 macOS 的 runner 自带
+      - name: 安装 Qt 运行所需的系统库（Linux）
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgl1 libegl1 libxkbcommon-x11-0 libdbus-1-3 \
+            libfontconfig1 libfreetype6
+
+      - name: 安装依赖
+        run: pip install PySide6
+
+      - name: 核心层测试
+        run: python tests/run_tests.py
+
+          python tools/check_iss.py
+      # ubuntu-latest 没有 X server，Qt 加载 xcb 插件失败并直接退出
+      # （Could not load the Qt platform plugin xcb）。offscreen 让它用
+      # 内存里的虚拟屏幕渲染——CI 只需要逻辑，不需要真的画出来。
+      #
+      # 这里**不用** `${{ runner.os == 'Windows' && '' || 'offscreen' }}`：
+      # GitHub Actions 里空串是 falsy，那个表达式恒等于 'offscreen'，
+      # Windows 上也会被设上——日志里 windows-latest 的 env 会明确出现
+      # QT_QPA_PLATFORM: offscreen。
+      # Actions 没有真正的三元运算符，要按平台取值就用矩阵变量。
+      - name: UI 层测试
+        run: python tests/test_qt_ui.py
+        env:
+          QT_QPA_PLATFORM: ${{ matrix.qt_platform }}
+
+      # 窗口交互测试此前**从未被任何流水线跑过**，而它覆盖的正是
+      # _rect_normal 这类「只有非拖拽器路径才触发」的崩溃。
+      - name: 窗口交互测试
+        run: python tests/test_qt_window.py
+        env:
+          QT_QPA_PLATFORM: ${{ matrix.qt_platform }}
+
+      # 逐页截图，作为 artifact 上传。
+      #
+      # **为什么必须有这一步。** 配色验收靠读代码是验不出来的——
+      # 界面曾经出现过「配色和设计稿不一样」，而配色字典、QSS 文本、
+      # widgets.py 全部逐字相同。真凶是一条 `QPushButton#NavGroup
+      # :not(:checked)`：Qt 不支持 :not()，遇到它会**静默丢弃这条
+      # 规则之后的全部内容**，于是卡片、主按钮、输入框、输出区的
+      # 配色全废。生成出来的 QSS 看起来完全正常。
+      #
+      # 只有让 Qt 真的渲染、再量像素才能发现。所以截图不是文档，
+      # 是**验收证据**——review 时直接看图，不用复现。
+      #
+      # 只在 Windows 上跑：linux 是 offscreen，而 offscreen 后端
+      # 不给部分控件应用 QSS，截出来的图与真机不一致。
+      - name: 逐页截图（真实渲染）
+        if: runner.os == 'Windows'
+        run: python tools/shoot_pages.py screenshots
+        env:
+          QT_QPA_PLATFORM: ${{ matrix.qt_platform }}
+
+      - name: 上传截图
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: screenshots/*.png
+          retention-days: 30
+
+      # 装包脚本的静态检查。放在这里而不是等「编译安装包」那步，
+      # 是因为编译要排在签名之后（约 2 分钟后才跑），而指令名写错、
+      # 重复这类错误在测试阶段就能查出来。纯 Python，跨平台都能跑。
+      - name: 检查装包脚本
+        run: python tools/check_iss.py
+        env:
+          PYTHONIOENCODING: utf-8
+
+  build:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装打包依赖
+        run: pip install PySide6 pyinstaller
+
+      - name: 打包 exe
+        run: python build.py --clean
+
+      # 打包必须用同一个装了 PySide6 的解释器，否则会打出缺 Qt 插件的
+      # 坏包（症状：启动报 "could not find or load the Qt platform
+      # plugin"）。这里实际启动一次，让 CI 把这类问题挡住。
+      - name: 验证 exe 能启动
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist\aicbbuu-network-tools.exe" -PassThru
+          Start-Sleep -Seconds 12
+          if ($p.HasExited) {
+            Write-Error "exe 启动后立刻退出，退出码 $($p.ExitCode)"
+            if (Test-Path error.log) { Get-Content error.log }
+            exit 1
+          }
+          Stop-Process -Id $p.Id
+          Write-Output "exe 启动正常"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: aicbbuu-network-tools-windows
+          path: dist/aicbbuu-network-tools.exe
+          if-no-files-found: error

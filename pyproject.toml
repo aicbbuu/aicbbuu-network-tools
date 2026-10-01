@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aicbbuu-network-tools"
+version = "1.0.0"
+description = "Windows 桌面网络诊断工具：延迟、路由、DNS、端口、带宽"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "aicbbuu" }]
+keywords = ["network", "diagnostics", "ping", "traceroute", "dns", "gui", "windows"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Win32 (MS Windows)",
+    "Environment :: X11 Applications",
+    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Natural Language :: Chinese (Simplified)",
+    "Operating System :: Microsoft :: Windows :: Windows 10",
+    "Operating System :: Microsoft :: Windows :: Windows 11",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Networking :: Monitoring",
+    "Topic :: System :: Networking :: Systems Administration",
+    "Topic :: Utilities",
+]
+
+# 运行时零第三方依赖——这是刻意的设计目标
+dependencies = [
+    # PySide6 6.x：LGPLv3，与本项目的 GPL-3.0-or-later 兼容。
+    # 选它而不是 pywebview 的理由：Qt 把所有运行时静态打包进 exe，
+    # 目标机不需要装任何东西——这是「给任何 Windows 都能直接跑」
+    # 的唯一可靠做法。pywebview 要借用系统 WebView2，Win10 上
+    # 不保证存在。
+    "PySide6>=6.6,<7",
+]
+
+[project.urls]
+Homepage = "https://github.com/aicbbuu/aicbbuu-network-tools"
+Repository = "https://github.com/aicbbuu/aicbbuu-network-tools"
+Issues = "https://github.com/aicbbuu/aicbbuu-network-tools/issues"
+
+[project.optional-dependencies]
+build = ["pyinstaller>=6.0"]
+
+[project.gui-scripts]
+aicbbuu-network-tools = "netdiag.__main__:main"
+
+[tool.setuptools]
+packages = ["netdiag", "netdiag.core", "netdiag.ui", "netdiag.ui.pages"]
+
+[tool.setuptools.package-data]
+netdiag = ["assets/*"]

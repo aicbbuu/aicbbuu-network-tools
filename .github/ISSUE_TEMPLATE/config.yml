@@ -1,0 +1,4 @@
+blank_issues_enabled: false
+# 刻意不放 Discussions 链接——仓库没开 Discussions，那个 URL 是死链。
+# 使用问题请直接开 issue，下面两个模板都留了位置。
+contact_links: []
