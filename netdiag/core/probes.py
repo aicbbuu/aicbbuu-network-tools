@@ -20,6 +20,8 @@ __all__ = [
     "ping", "tcping", "traceroute", "dns_lookup", "port_scan",
     "bandwidth_test", "network_info",
     "COMMON_PORTS", "parse_ports", "ping_summary",
+    "port_owners", "parse_netstat_listen",
+    "loss_probe",
 ]
 
 
@@ -554,3 +556,388 @@ def network_info(post: Post) -> None:
         post(KIND_LINE, "  （没有已建立的连接）")
     elif count > 30:
         post(KIND_LINE, f"  …… 共 {count} 条，只显示前 30 条")
+
+
+# ================================================================== #
+#  端口占用
+# ================================================================== #
+# netstat -ano 的输出形如：
+#   TCP    0.0.0.0:8080    0.0.0.0:0    LISTENING    1234
+# 本地地址和外部地址都可能带 IPv6 的 [::]:8080，解析时要一起处理。
+_RE_NETSTAT_ROW = re.compile(
+    r"^\s*(TCP|UDP)\s+(\S+):(\d+)\s+(\S+)\s*"
+    r"(?:(\S+)\s+)?(\d+)\s*$"
+)
+
+
+def parse_netstat_listen(rows: Iterable[str]) -> list[dict]:
+    """从 netstat -ano 的行里抽出「本机正在监听」的条目。
+
+    只留 LISTENING / 侦听 那类——已建立的连接占了同一个端口但不代表
+    「有人占着这个端口不让别人绑」，用户问的永远是后者。
+    """
+    out: list[dict] = []
+    for line in rows:
+        m = _RE_NETSTAT_ROW.match(line or "")
+        if not m:
+            continue
+        proto, local, port, _remote, state, pid = m.groups()
+        # state 为空说明是 UDP——UDP 没有「监听」这个状态，netstat 直接
+        # 把状态列留空。这里把「有状态」当成「已建立的连接」，那种不是
+        # 端口被占用（同一端口被多条连接共用是正常的）。
+        if state:
+            if state.upper() not in ("LISTENING", "侦听"):
+                continue
+            listening = True
+        else:
+            listening = True          # UDP 行：没有状态列即为占用
+        out.append({
+            "proto": proto.lower(),
+            "local": local,
+            "port": int(port),
+            "pid": int(pid),
+            "listen": listening,
+        })
+    return out
+
+
+def _pid_to_name(pid: int) -> tuple[str, str]:
+    """PID -> (进程名, 可执行文件路径)。取不到就返回占位。
+
+    tasklist 输出是 GBK 的表格，用 -FO CSV 拿干净字段；FO 参数在旧版
+    Windows 上不支持，所以失败时退回按行匹配。
+    """
+    try:
+        out: list[str] = []
+        run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+            out.append)
+        for line in out:
+            if not line.strip() or line.startswith("信息") or "INFO" in line:
+                continue
+            parts = [x.strip('"') for x in line.split('","')]
+            if len(parts) >= 2 and parts[1] == str(pid):
+                name = parts[0]
+                return name, name
+    except Exception:  # noqa: BLE001
+        pass
+    return f"PID {pid}", ""
+
+
+def port_owners(post: Post, port: int | None = None,
+                listening_only: bool = True) -> None:
+    """谁占着这个端口。
+
+    ``port`` 给定时只报这一个端口；给 None 时列出全部监听端口。
+    """
+    rows: list[str] = []
+    try:
+        if IS_WIN:
+            run(["netstat", "-ano"], rows.append)
+        else:
+            # 非 Windows 没有 -o（拿不到 PID），退回只看端口
+            run(["netstat", "-tuln"], rows.append)
+    except Exception as e:  # noqa: BLE001
+        post(KIND_ERROR, f"读取端口列表失败：{e}")
+        return
+
+    entries = parse_netstat_listen(rows)
+    if port is not None:
+        entries = [e for e in entries if e["port"] == port]
+
+    if not entries:
+        if port is not None:
+            post(KIND_STAT, {"found": 0, "port": port})
+            post(KIND_LINE, f"端口 {port} 当前没有任何进程监听。")
+            post(KIND_LINE, "「可以绑定」的意思是：这个端口现在没被占。")
+            post(KIND_LINE, "如果你启动服务时仍报「地址已在使用」，"
+                            "可能是 UDP 也被占了，或者占用进程刚好退出。")
+        else:
+            post(KIND_STAT, {"found": 0})
+            post(KIND_LINE, "没有正在监听的端口。")
+        return
+
+    # 同一个端口可能被 IPv4 和 IPv6 各占一条，去重后按端口号排
+    merged: dict[tuple[str, int], dict] = {}
+    for e in entries:
+        key = (e["proto"], e["port"])
+        if key not in merged or e["listen"]:
+            merged[key] = e
+    entries = sorted(merged.values(), key=lambda x: (x["port"], x["proto"]))
+
+    post(KIND_STAT, {"found": len(entries)})
+    post(KIND_LINE, f"共{len(entries)} 个监听条目"
+                    + (f"（端口 {port}）" if port is not None else ""))
+    post(KIND_LINE, "")
+
+    # 系统进程（PID 4是 System、0-1000 多为系统）单独标出来，
+    # 因为这类进程用户通常没法也不该去结束它。
+    for e in entries:
+        name, path = _pid_to_name(e["pid"])
+        sys_proc = e["pid"] in (0, 4) or e["pid"] < 1000
+        mark = "  [系统]" if sys_proc else ""
+        # netstat 的本地地址带端口后缀，要先剥掉。
+        # IPv6 是 ``[::]:8080`` 这种带方括号的写法，rsplit(":") 会把
+        # ``[::]`` 切成 ``[::``，所以要按右方括号判断而不是找最后一个冒号。
+        addr = e["local"]
+        if addr.endswith(f":{e['port']}"):
+            addr = addr[: -len(str(e["port"])) - 1]
+        addr = addr.strip("[]")
+
+        # 地址语义化：[::] / 0.0.0.0 是「所有网卡」，127.x 是「只对本机」，
+        # 其它具体地址才是「只对这台机器的该网卡开放」。写成中文，
+        # 因为面向的是不知道 [::] 是什么意思的普通用户。
+        if addr in ("0.0.0.0", "*", "::", ""):
+            scope = "所有网卡（局域网内其它设备也能连）"
+        elif addr.startswith("127.") or addr == "::1":
+            scope = "只对本机开放"
+        else:
+            scope = "只对这台机器开放"
+        fam = "IPv6" if ":" in addr else "IPv4"
+
+        post(KIND_LINE,
+             f"  {e['port']:>6} /{e['proto']:<4} PID {e['pid']:<7} {name}{mark}")
+        post(KIND_LINE, f"         {fam} {addr} —— {scope}")
+        if sys_proc:
+            post(KIND_LINE, f"         系统进程，结束它需要管理员权限且可能"
+                            f"影响系统功能，不建议手动处理")
+
+    if port is not None and entries:
+        post(KIND_LINE, "")
+        pids = {e["pid"] for e in entries}
+        if len(pids) == 1:
+            pid = pids.pop()
+            post(KIND_LINE, f"端口 {port} 被 PID {pid} 占用。")
+            post(KIND_LINE, f"要腾出这个端口，先关掉那个程序；"
+                            f"确实需要强制结束可以在任务管理器里找 PID {pid}。")
+        else:
+            post(KIND_LINE, f"端口 {port} 上有多个协议在监听（IPv4/IPv6 各一条"
+                            f"通常是同一个进程），不代表有多个程序抢。")
+
+
+# ================================================================== #
+#  持续丢包 / 抖动定位
+# ================================================================== #
+#: 单次 ping 一发一收就能知道 RTT，但**丢包必须逐次发包**才看得见：
+#: ping -n 20 是把 20 个包一口气发出去，回来的行和发出去的包**没有
+#: 可靠的对应关系**（超时的那次 ping 根本不打印任何行）。所以这里每次
+#: 只发一个包、拿到结果再发下一个——慢一点，但换来「第 7 次丢了」这种
+#: 能直接定位的信息。
+_LOSS_REPLY = re.compile(r"(TTL|ttl)=", re.I)
+_LOSS_STATS = re.compile(r"已发送| Sent|Sending|发送")
+
+
+def _one_icmp(host: str, timeout_ms: int) -> tuple[int | None, str]:
+    """发一个 ICMP 包。返回 (RTT 毫秒, 未回复原因)。
+
+    RTT 为 None 就是丢了。Windows 的 ping 每次都会先打印
+    「正在 Ping ...」再逐行回复；不发包就没法知道是「超时」还是
+    「目标不可达」，所以这里靠回复行里有没有 TTL= 判断。
+    """
+    flag = "-n" if IS_WIN else "-c"
+    wait = ["-w", str(timeout_ms)] if IS_WIN else ["-W", str(max(1, timeout_ms // 1000))]
+    lines: list[str] = []
+    run(["ping", flag, "1", *wait, host], lines.append)
+
+    for line in lines:
+        m = _RE_RTT.search(line)
+        if m:
+            return _first_int(m), ""
+    # 没收到 RTT —— 判断原因
+    joined = "\n".join(lines)
+    if any(k in joined for k in ("unreachable", "不可达", "无法访问",
+                                 "Destination host", "TTL expired", "超时")):
+        if "TTL expired" in joined or "TTL 已超时" in joined:
+            return None, "TTL 超时（超过跳数限制）"
+        return None, "目标不可达"
+    if any(k in joined for k in ("unrecognized", "invalid", "无法解析",
+                                 "not found", "Non-existent")):
+        return None, "主机名无法解析"
+    if any(k in joined for k in ("100% 丢包", "100% loss", "0 received",
+                                 "请求超时", "timed out")):
+        return None, "请求超时"
+    return None, "无响应"
+
+
+def _one_tcp(host: str, port: int, timeout: float) -> tuple[int | None, str]:
+    """一次 TCP 握手。返回 (耗时毫秒, 失败原因)。"""
+    t0 = time.perf_counter()
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return int(round((time.perf_counter() - t0) * 1000)), ""
+    except socket.timeout:
+        return None, "连接超时"
+    except ConnectionRefusedError:
+        return None, "连接被拒绝（端口没开）"
+    except OSError as e:
+        return None, e.strerror or str(e)
+
+
+def loss_probe(post: Post, host: str, *, count: int = 30,
+               interval: float = 0.5, timeout_ms: int = 1500,
+               mode: str = "icmp", port: int = 443) -> None:
+    """持续采样，定位丢包发生在哪几次、抖动有多大。
+
+    为什么不是 ``ping -n 30`` 一把梭：ping 打包发包时，超时的那一次
+    **不产生任何输出**，事后无法判断是哪几次丢的。视频会议卡顿、
+    游戏跳 ping 这类问题问的恰恰是「第几分钟丢了一次」——必须逐次采样。
+
+    采样期间 post 一条 KIND_PROGRESS 之外的普通行做进度提示，UI 那边
+    逐条追加，所以用户能看到它在动，不是卡住。
+
+    ``mode`` 为 ``"tcp"`` 时用 TCP 握手测——ICMP 被封的环境（企业网、
+    云主机、部分校园网）里 ICMP 全丢，但业务正常，用 TCP 才测得准。
+    """
+    if not host:
+        post(KIND_ERROR, "请填写目标主机")
+        return
+    count = max(1, min(count, 200))
+    name = host.strip()
+
+    if mode == "tcp":
+        try:
+            ip = socket.gethostbyname(name)
+        except socket.gaierror as e:
+            post(KIND_ERROR, f"DNS 解析失败：{name} -> {e.strerror or e}")
+            return
+        post(KIND_LINE, f"目标：{name}:{port}  ({ip})")
+        post(KIND_LINE, f"TCP 握手采样 {count} 次，间隔 {interval:g} 秒，"
+                        f"单次超时 {timeout_ms / 1000:g} 秒")
+    else:
+        post(KIND_LINE, f"目标：{name}")
+        post(KIND_LINE, f"ICMP 采样 {count} 次，间隔 {interval:g} 秒，"
+                        f"单次超时 {timeout_ms / 1000:g} 秒")
+    post(KIND_LINE, "")
+
+    samples: list[dict] = []          # 逐次结果，最后交给 UI 画图
+    for i in range(count):
+        if mode == "tcp":
+            rtt, why = _one_tcp(name, port, timeout_ms / 1000.0)
+        else:
+            rtt, why = _one_icmp(name, timeout_ms)
+
+        samples.append({
+            "index": i + 1,
+            "ok": rtt is not None,
+            "rtt": rtt,
+            "reason": why,
+        })
+        if rtt is not None:
+            post(KIND_LINE, f"  {i + 1:>3} / {count}   {rtt:>5} ms")
+        else:
+            post(KIND_LINE, f"  {i + 1:>3} / {count}    ——   丢包（{why}）")
+
+        # 最后一次之后不用再等
+        if i < count - 1:
+            time.sleep(interval)
+
+    rtts = [x["rtt"] for x in samples if x["ok"]]
+    lost = [x["index"] for x in samples if not x["ok"]]
+    stat = ping_summary(rtts, count)
+    stat["samples"] = samples
+    stat["lost_at"] = lost
+    post(KIND_STAT, stat)
+
+    _loss_verdict(post, stat, lost, samples, mode)
+
+
+def _loss_verdict(post: Post, stat: dict, lost: list[int],
+                  samples: list[dict], mode: str) -> None:
+    """把数字翻译成结论。用户问的是「我网络有没有问题」。
+
+    判定的关键是看**丢包的形状**，不是只看丢包率：
+
+    · 全部超时 + ICMP  → 先排除「ICMP 被协议层拦截」，这是最常见的
+      误判来源，直接归因到硬件会把人带偏。
+    · 成段连续丢      → 链路或设备故障，重试无用。
+    · 零散丢          → 无线干扰 / 接触不良，是常态。
+    """
+    post(KIND_LINE, "")
+    post(KIND_LINE, "═══ 结论 ═══")
+
+    sent = stat["sent"]
+    loss = stat["loss"]
+    if sent == 0:
+        return
+
+    all_lost = len(lost) == sent
+
+    if not lost:
+        post(KIND_LINE, f"  ✓ {sent} 次采样全部成功，没有丢包。")
+    elif all_lost:
+        post(KIND_LINE, f"  ✗ {sent} 次采样全部无响应")
+    else:
+        post(KIND_LINE, f"  ⚠ 丢包 {loss:.1f}%（{len(lost)}/{sent} 次）")
+
+    # ---- 丢包的「形状」比丢包率更能说明问题 ----
+    if lost:
+        runs = _loss_runs(lost)
+
+        if all_lost:
+            # 全丢的成因和「部分丢」完全不同：ICMP 被协议层拦掉时，
+            # 表现就是 100% 超时，但它和网线坏了的现象**一模一样**。
+            # 所以先给一条能立刻自查的判断，再谈硬件。
+            if mode == "icmp":
+                post(KIND_LINE, "  先别急着换硬件——ICMP 被协议层拦截时，"
+                                "现象和断网完全一样。")
+                post(KIND_LINE, "      企业网、云主机、容器网络经常在协议层"
+                                "丢掉 ping 包。")
+                post(KIND_LINE, "      把上面的方式切到「TCP 握手」再测一次："
+                                "走真实业务路径，ICMP 被封也能测出结果。")
+                post(KIND_LINE, "      如果 TCP 握手也全丢，才是真的断了——"
+                                "这时才该去查网线、网口、路由器。")
+            else:
+                post(KIND_LINE, "  TCP 握手也全部失败，说明目标端口确实不通。")
+                post(KIND_LINE, "      可能是服务没开、端口被防火墙拦截、"
+                                "或者目标真的宕机了。先换一个端口试。")
+        else:
+            longest = max(runs, key=lambda r: r[1] - r[0])
+            span = longest[1] - longest[0] + 1
+            if span >= 3:
+                post(KIND_LINE, f"  丢包成段出现（第 {longest[0]}–{longest[1]} 次"
+                                f"连续丢 {span} 次）")
+                post(KIND_LINE, "      成段丢包通常不是随机干扰，而是某一段链路"
+                                "或某个设备出了问题：网线/网口接触不良、"
+                                "交换机端口、光模块、或者上游运营商的这段线路。")
+                post(KIND_LINE, "      随机重试解决不了，需要换硬件或找运营商。")
+            else:
+                shown = "、".join(map(str, lost[:12]))
+                post(KIND_LINE, f"  丢包零散出现在第 {shown} 次"
+                                + ("…" if len(lost) > 12 else ""))
+                post(KIND_LINE, "      零散丢一两包在无线网络和家用路由器上是常态，"
+                                "人眼和耳朵基本感知不到。")
+                post(KIND_LINE, "      但如果你正在经历视频卡顿或游戏跳 ping，"
+                                "那这些零星丢包就是元凶——无线信号弱、"
+                                "2.4G 频段被邻居干扰、或网线水晶头接触不良。")
+
+    # ---- 抖动 ----
+    if stat.get("jitter") is not None and stat["avg"]:
+        j = stat["jitter"]
+        if j / stat["avg"] > 0.3:
+            post(KIND_LINE, f"  ⚠ 抖动 {j:.1f} ms，相对平均延迟 {stat['avg']:.0f} ms "
+                            f"波动很大")
+            post(KIND_LINE, "      延迟忽高忽低会让实时应用（会议、游戏、语音）"
+                            "明显卡顿，即使平均延迟看起来不差。")
+        else:
+            post(KIND_LINE, f"  ✓ 抖动 {j:.1f} ms（相对平均 {stat['avg']:.0f} ms "
+                            f"算平稳）")
+
+    if mode == "icmp" and all_lost:
+        post(KIND_LINE, "")
+        post(KIND_LINE, "  补充：如果你确信网页能正常打开，那这就是 ICMP 被封，"
+                        "不是网络故障。")
+
+
+def _loss_runs(lost: list[int]) -> list[tuple[int, int]]:
+    """把丢包序号压成连续段：``[3,4,5,9]`` -> ``[(3,5), (9,9)]``。"""
+    if not lost:
+        return []
+    runs: list[tuple[int, int]] = []
+    start = prev = lost[0]
+    for n in lost[1:]:
+        if n == prev + 1:
+            prev = n
+            continue
+        runs.append((start, prev))
+        start = prev = n
+    runs.append((start, prev))
+    return runs

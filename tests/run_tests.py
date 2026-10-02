@@ -1983,6 +1983,7 @@ def main() -> int:
         t_netfix_readonly_truth, t_netfix_flushdns_button,
         # 测速：按时间停止，不是跑满固定字节数
         t_speed_duration, t_speed_seconds_param, t_speed_no_30mb_cap,
+        t_port_listen, t_port_merge, t_port_empty, t_route_ifaces, t_route_multi_default, t_route_no_default, t_route_normal_quiet, t_route_cidr, t_nichealth_loopback, t_nichealth_dotfill, t_nichealth_stack_dlls, t_nichealth_catalog_split, t_loss_runs, t_loss_stat_fields, t_loss_verdict_shape, t_loss_verdict_all_lost, t_loss_bounds, t_chart_ticks, t_chart_y_range, t_note_bold, t_note_usage, t_version_sync
     ]:
         fn()
 
@@ -2105,6 +2106,406 @@ def t_speed_no_30mb_cap():
             "_RANGE_CAP 取代")
     assert not hasattr(probes, "_SAMPLE_BYTES"), (
         "probes 模块里不该再有 _SAMPLE_BYTES")
+
+
+
+# ================================================================== #
+#  v1.1.0 新增功能的单测
+# ================================================================== #
+# 这四项都是**解析 / 判定**逻辑，出错时用户看到的是「说了一套错话」
+# 而不是报错——所以必须用手写的样本逐条钉死，而不是靠真机跑一遍。
+
+@check("端口占用: netstat 解析出监听项，排除已建立连接")
+def t_port_listen():
+    """只有 LISTENING / UDP 行算「占用」。
+
+    已建立的连接（ESTABLISHED）也占着端口号，但**不代表端口不能被别人
+    绑定**——用户问的永远是后者。把它算进去会让他们去杀一个正在
+    正常通信的进程。
+    """
+    from netdiag.core.probes import parse_netstat_listen
+
+    rows = [
+        "  TCP    0.0.0.0:135            0.0.0.0:0              LISTENING       472",
+        "  TCP    [::]:445                [::]:0                 LISTENING         4",
+        "  TCP    10.0.0.5:52000         93.184.216.34:443      ESTABLISHED     7777",
+        "  UDP    0.0.0.0:5353            *:*                                    3124",
+        "  协议  本地地址          外部地址        状态           PID",   # 表头要忽略
+        "活动连接",
+    ]
+    got = parse_netstat_listen(rows)
+    ports = sorted(e["port"] for e in got)
+    assert ports == [135, 445, 5353], (
+        f"应解析出 135/445/5353 三项（ESTABLISHED 和表头要排除），实际 {ports}")
+    # IPv6 的 [::]:445 要正确拆出端口 445，不能因为方括号拆错
+    v6 = [e for e in got if e["port"] == 445][0]
+    # local 存的是**地址部分**，端口单独存在 port 字段里——解析时就拆开，
+    # 展示层不用再处理方括号和端口后缀。
+    assert v6["local"] == "[::]", f"IPv6 地址部分应为 [::]，实际 {v6['local']!r}"
+    assert v6["pid"] == 4, f"PID 应为 4，实际 {v6['pid']}"
+
+
+@check("端口占用: 监听项合并去重（IPv4/IPv6 同端口）")
+def t_port_merge():
+    """同一个进程的 IPv4 和 IPv6 监听会占两条，但用户只想看到一条。"""
+    from netdiag.core.probes import parse_netstat_listen
+    rows = [
+        "  TCP    0.0.0.0:8080            0.0.0.0:0              LISTENING      1234",
+        "  TCP    [::]:8080              [::]:0                 LISTENING      1234",
+    ]
+    got = parse_netstat_listen(rows)
+    assert len(got) == 2, (
+        f"解析层应保留两条（去重是展示层的事），实际 {len(got)} 条")
+
+
+@check("端口占用: 空输出不崩")
+def t_port_empty():
+    """netstat 失败或输出为空时返回空列表，不能抛异常。"""
+    from netdiag.core.probes import parse_netstat_listen
+    assert parse_netstat_listen([]) == []
+    assert parse_netstat_listen(["", "   ", "乱码行"]) == []
+
+
+@check("路由策略: 解析接口清单，去掉 MAC 前缀")
+def t_route_ifaces():
+    """route print 的接口列表有中文和英文两种格式，名字都要能取对。
+
+    中文版是「索引...MAC ...... 网卡名」，MAC 和名字之间用 6 个点
+    分隔；英文版只有「索引...网卡名」。早先按空白切分，两种都会出错。
+    """
+    from netdiag.core.netsys import parse_ifaces
+
+    cn = """
+接口列表
+===========================================================================
+ 5...00 0c 29 31 82 b4 ......Intel(R) 82574L Gigabit Network Connection
+ 1...........................Software Loopback Interface 1
+"""
+    got = parse_ifaces(cn)
+    assert got.get(5) == "Intel(R) 82574L Gigabit Network Connection", (
+        f"中文格式的网卡名应去掉 MAC 前缀，实际 {got.get(5)!r}")
+    assert got.get(1) == "Software Loopback Interface 1", (
+        f"英文格式应正常取出，实际 {got.get(1)!r}")
+    assert "0c 29" not in (got.get(5) or ""), "名字里不该残留 MAC"
+
+
+@check("路由策略: 识别多默认路由（VPN 场景）")
+def t_route_multi_default():
+    """装了 VPN 会有多条默认路由，要提示但不算错误。"""
+    from netdiag.core.netsys import analyze_routes, Route
+
+    routes = [
+        Route("0.0.0.0", "0.0.0.0", "192.168.153.2", "192.168.153.128", 25),
+        Route("0.0.0.0", "0.0.0.0", "10.8.0.1", "10.8.0.2", 5),
+    ]
+    issues = analyze_routes(routes, {})
+    titles = [i["title"] for i in issues]
+    assert any("默认路由" in t and "2 条" in t for t in titles), (
+        f"应报「有 2 条默认路由」，实际 {titles}")
+
+
+@check("路由策略: 没有默认路由判为严重异常")
+def t_route_no_default():
+    """没有默认路由 = 上不了任何外网，是最严重的一种。"""
+    from netdiag.core.netsys import analyze_routes, Route
+
+    routes = [Route("192.168.153.0", "255.255.255.0", "0.0.0.0",
+                     "192.168.153.128", 281)]
+    issues = analyze_routes(routes, {})
+    bad = [i for i in issues if i["level"] == "bad"]
+    assert bad and "没有默认路由" in bad[0]["title"], (
+        f"应报「没有默认路由」且级别为 bad，实际 {[i['title'] for i in issues]}")
+
+
+@check("路由策略: 正常单默认路由不误报")
+def t_route_normal_quiet():
+    """普通家用网络必须安静——见不到问题还报一堆警告比不报更糟。"""
+    from netdiag.core.netsys import analyze_routes, Route
+    import netdiag.core.netsys as netsys_mod
+
+    netsys_mod._IFACE_BY_ADDR = {
+        "192.168.153.128": "Intel(R) 82574L Gigabit Network Connection",
+    }
+    routes = [
+        Route("0.0.0.0", "0.0.0.0", "192.168.153.2", "192.168.153.128", 25),
+        Route("192.168.153.0", "255.255.255.0", "0.0.0.0", "192.168.153.128", 281),
+    ]
+    issues = analyze_routes(routes, {})
+    warns = [i for i in issues if i["level"] in ("bad", "warn")]
+    assert not warns, f"正常网络不该有 bad/warn，实际 {[i['title'] for i in warns]}"
+    netsys_mod._IFACE_BY_ADDR = None
+
+
+@check("路由策略: CIDR 显示，默认路由是 /0")
+def t_route_cidr():
+    """默认路由必须显示成 0.0.0.0/0。
+
+    早先用 ``if bits`` 判空，而 /0 的前缀长度就是 0——真值判断会把
+    合法结果当成「算不出来」，显示成 0.0.0.0/?。
+    """
+    from netdiag.core.netsys import _fmt_net, Route
+
+    assert _fmt_net(Route("0.0.0.0", "0.0.0.0", "1.2.3.4", "1.2.3.4", 1)) \
+        == "0.0.0.0/0", "默认路由应显示 /0"
+    assert _fmt_net(Route("192.168.1.0", "255.255.255.0", "0.0.0.0",
+                          "1.2.3.4", 1)) == "192.168.1.0/24"
+    assert _fmt_net(Route("127.0.0.0", "255.0.0.0", "0.0.0.0",
+                          "127.0.0.1", 1)) == "127.0.0.0/8"
+
+
+@check("网卡健康: 回环接口不算虚拟网卡")
+def t_nichealth_loopback():
+    """每台机器都有回环接口，看到它不该被提示「装了虚拟网卡」。"""
+    from netdiag.core.netsys import _is_vnic
+
+    assert not _is_vnic("Software Loopback Interface 1")
+    assert not _is_vnic("Loopback Pseudo-Interface 1")
+    assert not _is_vnic("以太网适配器 Ethernet0")
+    assert _is_vnic("WireGuard Tunnel")
+    assert _is_vnic("Tailscale Adapter")
+    assert _is_vnic("Cisco AnyConnect Secure Mobility Client Virtual Miniport")
+
+
+@check("网卡健康: ipconfig 点线填充正确取值")
+def t_nichealth_dotfill():
+    r"""ipconfig 用 ``. . . :`` 点线填充对齐标签和值。
+
+    正则如果写成 ``r"IPv4.*?:\s*(值)"``，会把标签**自带的冒号**
+    （IPv4 的那个）当分隔符，取出来的是「地址 . . . . . .」这种垃圾，
+    结果掩码算出来是 /0。这个 bug 实测踩过。
+    """
+    from netdiag.core.netsys import _field
+
+    seg = """   描述. . . . . . . . . . . . . . . : Intel(R) 82574L
+   IPv4 地址 . . . . . . . . . . . . : 192.168.153.128(首选)
+   子网掩码  . . . . . . . . . . . . : 255.255.255.0
+   默认网关. . . . . . . . . . . . . : 192.168.153.2
+   DHCP 服务器 . . . . . . . . . . . : 192.168.153.254
+"""
+    assert _field(seg, "IPv4 地址", "IPv4 Address") == "192.168.153.128", (
+        "IPv4 应取到裸地址，(首选) 后缀要去掉")
+    assert _field(seg, "子网掩码", "Subnet Mask") == "255.255.255.0"
+    assert _field(seg, "默认网关", "Default Gateway") == "192.168.153.2"
+    assert _field(seg, "DHCP 服务器", "DHCP Server") == "192.168.153.254"
+    assert _field(seg, "描述", "Description") == "Intel(R) 82574L"
+    assert _field(seg, "不存在的标签") == ""
+
+
+@check("网卡健康: 协议栈只查真实存在的组件")
+def t_nichealth_stack_dlls():
+    """必备组件必须按 DLL 判断，不能按显示名。
+
+    早先找 ``ms_iphlpapi`` / ``ms_lldp`` / ``ms_bridge``，但这三个
+    **不是 Winsock 组件**——它们是 NDIS 层内核驱动，压根不出现在
+    ``netsh winsock show catalog`` 里。结果在一台网络完全正常的
+    机器上被判成「协议栈损坏」，三处误报。
+    """
+    from netdiag.core.netsys import _STACK_CORE_DLLS
+
+    names = [dll for dll, _ in _STACK_CORE_DLLS]
+    assert "mswsock.dll" in names, f"TCP/IP 套接字必须在列，实际 {names}"
+    for bogus in ("iphlpapi.dll", "lltdp.dll", "bridge.sys"):
+        assert bogus not in names, (
+            f"{bogus} 不是 Winsock 组件，不该出现在必备列表里")
+
+
+@check("网卡健康: Winsock 目录按 DLL 路径拆条")
+def t_nichealth_catalog_split():
+    from netdiag.core.netsys import _split_catalog
+
+    cat = """Winsock 目录提供程序项
+---------------------------------------------------------------------------
+提供程序项:                             默认提供程序
+描述:                               MSAFD Tcpip [TCP/IP]
+提供程序路径:                       %SystemRoot%\\system32\\mswsock.dll
+提供程序项:                             第三方代理
+描述:                               Some VPN Provider
+提供程序路径:                       C:\\Program Files\\VPN\\vpnwsp.dll
+"""
+    got = _split_catalog(cat)
+    assert len(got) == 2, f"应拆出 2 条，实际 {got}"
+    assert got[0] == ("MSAFD Tcpip [TCP/IP]", "%SystemRoot%\\system32\\mswsock.dll"), (
+        f"第一条解析错，实际 {got[0]}")
+    assert "vpnwsp.dll" in got[1][1], f"第二条路径应保留，实际 {got[1]}"
+
+
+@check("持续丢包: 连续段识别")
+def t_loss_runs():
+    """丢包序号要能压成连续段——这是区分链路故障和无线干扰的关键。"""
+    from netdiag.core.probes import _loss_runs
+
+    assert _loss_runs([3, 4, 5, 9]) == [(3, 5), (9, 9)]
+    assert _loss_runs([1, 2, 3]) == [(1, 3)]
+    assert _loss_runs([5]) == [(5, 5)]
+    assert _loss_runs([]) == []
+    assert _loss_runs([1, 2, 3, 4, 5]) == [(1, 5)]
+
+
+@check("持续丢包: 统计字段完整（含 samples 和 lost_at）")
+def t_loss_stat_fields():
+    """UI 画图靠 samples 和 lost_at，两个字段都不能少。"""
+    from netdiag.core.probes import ping_summary
+
+    st = ping_summary([10, 20, 30], 5)
+    assert st["sent"] == 5 and st["recv"] == 3
+    assert abs(st["loss"] - 40.0) < 0.01, f"丢包率应为 40%，实际 {st['loss']}"
+    assert st["min"] == 10 and st["max"] == 30
+    assert st["avg"] == 20
+
+
+@check("持续丢包: 结论分支——零散丢 vs 成段丢")
+def t_loss_verdict_shape():
+    """结论文字必须跟着丢包形状走。
+
+    成段丢要说「换硬件」，零散丢要说「属常态」——反过来会把人引到
+    错误的解决方向上。
+    """
+    from netdiag.core.probes import _loss_verdict, ping_summary
+
+    def run(samples, mode="icmp"):
+        rtts = [x["rtt"] for x in samples if x["ok"]]
+        lost = [x["index"] for x in samples if not x["ok"]]
+        out = []
+        _loss_verdict(lambda k, v: out.append(str(v)), ping_summary(rtts, len(samples)),
+                      lost, samples, mode)
+        return "\n".join(out)
+
+    scatter = [{"index": i, "ok": i not in (3, 9), "rtt": None if i in (3, 9) else 18,
+                "reason": "请求超时"} for i in range(1, 15)]
+    text = run(scatter)
+    assert "零散" in text and "常态" in text, f"零散丢应说「常态」，实际：{text}"
+
+    burst = [{"index": i, "ok": not (5 <= i <= 10), "rtt": None if 5 <= i <= 10 else 25,
+              "reason": "请求超时"} for i in range(1, 15)]
+    text = run(burst)
+    assert "成段" in text and "硬件" in text, f"成段丢应说「换硬件」，实际：{text}"
+
+
+@check("持续丢包: 全丢时先排除 ICMP 被封，不误导向换硬件")
+def t_loss_verdict_all_lost():
+    """ICMP 全丢最常见的原因是**被协议层拦截**，不是硬件坏。
+
+    早先的逻辑会同时说「成段丢包，换硬件」和「可能是 ICMP 被封」——
+    自相矛盾，用户按前一句去换网卡就白花钱了。
+    """
+    from netdiag.core.probes import _loss_verdict, ping_summary
+
+    samples = [{"index": i, "ok": False, "rtt": None, "reason": "请求超时"}
+               for i in range(1, 11)]
+    out = []
+    _loss_verdict(lambda k, v: out.append(str(v)),
+                  ping_summary([], len(samples)),
+                  [x["index"] for x in samples], samples, "icmp")
+    text = "\n".join(out)
+
+    # 「先别急着换硬件」里也含「换硬件」三个字，所以不能简单子串否定——
+    # 要看有没有出现**肯定**建议换硬件的那句（成段丢分支的措辞）。
+    assert "需要换硬件或找运营商" not in text, (
+        f"ICMP 全丢时不该建议去换硬件：{text}")
+    assert "先别急着换硬件" in text or "拦截" in text, (
+        f"应提示先排除 ICMP 被封，实际：{text}")
+    assert "TCP" in text, f"应给出「换 TCP 握手再试」的下一步，实际：{text}"
+
+
+@check("持续丢包: 采样次数和间隔有上下限")
+def t_loss_bounds():
+    """count 上限 200：再多就变成一个跑几分钟的测试，用户会以为卡死。"""
+    import inspect
+    from netdiag.core import probes
+
+    sig = inspect.signature(probes.loss_probe)
+    assert "count" in sig.parameters, "loss_probe 应接受 count 参数"
+    src = inspect.getsource(probes.loss_probe)
+    assert "min(count, 200)" in src, (
+        "count 应被夹在 1~200，否则一次采样能跑几分钟")
+
+
+@check("图表: Y 轴刻度稳定在 3~5 条")
+def t_chart_ticks():
+    """刻度方向早先写反了：区间窄时只剩 1 条，曲线全挤在顶部。"""
+    from netdiag.ui.pages.loss_page import RttChart
+
+    for lo, hi in ((15.3, 20.7), (0.5, 2.5), (45, 51), (0, 1), (-3, 7)):
+        ticks = RttChart._ticks(lo, hi)
+        assert 3 <= len(ticks) <= 6, (
+            f"区间 [{lo},{hi}] 应给 3~5 条刻度，实际 {len(ticks)}: {ticks}")
+        assert all(lo <= v <= hi for v in ticks), (
+            f"刻度不能落在区间外：{ticks} 不属于 [{lo},{hi}]")
+
+
+@check("图表: 纵轴范围留出余量，最小跨度 8ms")
+def t_chart_y_range():
+    """1ms 和 2ms 的差别不该被拉成满屏落差。"""
+    from netdiag.ui.pages.loss_page import RttChart
+
+    lo, hi = RttChart._y_range([1, 2])
+    assert hi - lo >= 8.0, f"最小跨度应兜到 8ms，实际 {hi - lo}"
+    assert lo < 1 and hi > 2, f"要在数据两侧留余量，实际 [{lo},{hi}]"
+
+
+@check("说明文字: Markdown 粗体转 HTML，未配对星号保留")
+def t_note_bold():
+    """``**xxx**`` 要变粗体，不能原样显示成星号。
+
+    这个 bug 从 v1.0.0 就有：故障诊断、多目标对比、系统网络状态
+    三个页面的说明文字上全是裸露的 ``**``。
+    """
+    from netdiag.ui.widgets import _md_bold
+
+    assert _md_bold("**重点**：说明") == "<b>重点</b>：说明"
+    assert _md_bold("A **x** B **y** C") == "A <b>x</b> B <b>y</b> C"
+    assert _md_bold("没有星号") == "没有星号"
+    # 尖括号必须转义，否则 HTML 解析器会把 <512 当标签，文字会少一截
+    assert "&lt;" in _md_bold("大小 <512 ms")
+    # 未配对的 ** 原样保留——宁可少强调，也不要输出一堆裸星号
+    assert _md_bold("只有一个 ** 没配对") == "只有一个 ** 没配对"
+
+
+@check("说明文字: 所有带星号的页面都走 note()")
+def t_note_usage():
+    """凡是用 ** 写说明文字的地方必须走 widgets.note()。
+
+    直接 QLabel 会把星号原样显示出来——v1.0.0 到 v1.0.1 都有这个问题。
+    """
+    import re
+    from pathlib import Path
+
+    pages = Path(ROOT) / "netdiag" / "ui" / "pages"
+    bad = []
+    for f in pages.glob("*.py"):
+        src = f.read_text(encoding="utf-8")
+        # 找 QLabel(...) 且内容含 ** 的（排除 note( 调用本身）
+        for m in re.finditer(r"QLabel\((.*?)\)\s*\n\s*(?:\w+\.)?set", src,
+                             re.S):
+            if "**" in m.group(1):
+                bad.append(f.name)
+    assert not bad, (
+        f"这些页面用 QLabel 显示带 ** 的说明文字，星号会原样露出：{sorted(set(bad))}")
+
+
+@check("版本号: 四处同步为 1.1.0")
+def t_version_sync():
+    """版本号必须四处一致，漏一处就会出现「关于页说 A、安装包写 B」。"""
+    import re as _re
+
+    init = (ROOT / "netdiag" / "__init__.py").read_text(encoding="utf-8")
+    m = _re.search(r'__version__\s*=\s*"([^"]+)"', init)
+    assert m, "netdiag/__init__.py 里找不到 __version__"
+    ver = m.group(1)
+
+    pp = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    m2 = _re.search(r'^version\s*=\s*"([^"]+)"', pp, _re.M)
+    assert m2, "pyproject.toml 里找不到 version"
+    assert m2.group(1) == ver, (
+        f"pyproject.toml 是 {m2.group(1)}，__init__.py 是 {ver}")
+
+    iss = (ROOT / "packaging" / "netdiag.iss").read_text(encoding="utf-8")
+    m3 = _re.search(r'#define\s+AppVersion\s+"([^"]+)"', iss)
+    assert m3, "netdiag.iss 里找不到 AppVersion"
+    assert m3.group(1) == ver, (
+        f"netdiag.iss 是 {m3.group(1)}，__init__.py 是 {ver}")
+
+    assert ver == "1.1.0", f"本轮目标版本是 1.1.0，实际 {ver}"
 
 
 if __name__ == "__main__":

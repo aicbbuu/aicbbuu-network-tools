@@ -17,7 +17,7 @@ from PySide6.QtWidgets import QLabel, QVBoxLayout
 from ...core import netsys
 from ...core.runner import KIND_LINE, KIND_STAT
 from .base import Page
-from ..widgets import hline
+from ..widgets import hline, note
 
 
 class SysDiagPage(Page):
@@ -32,7 +32,7 @@ class SysDiagPage(Page):
                 "DNS 缓存", "防火墙", "第三方 LSP", "成功读取")
 
     def _build_form(self, lay: QVBoxLayout) -> None:
-        tip = QLabel(
+        tip = note(
             "这一页只读取状态，不改动任何配置，随时可跑。\n\n"
             "**路由表**回答「流量会走哪个出口」——多条默认路由说明"
             "多网卡或 VPN 叠加，访问内网可能走错了出口。\n\n"
@@ -40,8 +40,8 @@ class SysDiagPage(Page):
             "小包正常、大包被静默丢弃，症状是 ping 一切正常但网页很慢。\n\n"
             "**Winsock 目录**里有第三方项，说明有软件往网络栈里插了"
             "组件。装完某软件后网络异常，优先怀疑它们。")
-        tip.setObjectName("Dim")
-        tip.setWordWrap(True)
+        # 说明文字走 note()：它默认开 RichText，**强调**才会渲染成粗体。
+        # 直接用 QLabel 会把 ** 原样显示出来——v1.0.0 起就有的问题。
         lay.addWidget(tip)
 
         row = QVBoxLayout()

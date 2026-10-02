@@ -10,7 +10,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 # 版本号的**唯一来源**。app.py 若自行定义一份 APP_VERSION，
 # 两处会不一致，因此统一从这里取。
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 __author__ = "aicbbuu"
 __license__ = "GPL-3.0-or-later"
 __app_name__ = "aicbbuu network tools"

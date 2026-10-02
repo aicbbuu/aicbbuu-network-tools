@@ -10,6 +10,8 @@ QGraphicsDropShadowEffect 负责**，不再需要用 Canvas 手绘几何。
 """
 from __future__ import annotations
 
+import re
+
 from typing import Any
 
 from PySide6.QtCore import Qt
@@ -203,6 +205,51 @@ class FieldRow(QWidget):
         lay.addWidget(lbl)
         lay.addWidget(widget, 1 if stretch else 0)
         self.widget = widget
+
+
+# ---------------------------------------------------------------- #
+#  说明文字
+# ---------------------------------------------------------------- #
+def note(text: str, *, parent=None) -> QLabel:
+    """页面顶部的灰色说明文字。
+
+    **会自动把 Markdown 的 ``**强调**`` 转成 HTML 粗体。**
+
+    QLabel 的默认文本格式是 AutoText：Qt 看到不像 HTML 的开头就按纯文本
+    显示，于是 ``**会原样显示成一串裸露的星号``。这个 bug 从 v1.0.0 就有
+    ——已发布的故障诊断页上能看到「诊断按网络协议栈**从底向上**逐层进行」
+    这样带星号的文案，多目标对比、系统网络状态、网卡健康等页也一样。
+
+    注意 ``setTextFormat(RichText)`` 本身**不够**：RichText 走的是
+    **HTML** 解析器，而 ``**`` 是 Markdown 语法、不是 HTML 标签，HTML
+    解析器不认它。所以必须先把 ``**xxx**`` 换成 ``<b>xxx</b>``。
+
+    所以凡是用 ``**`` 写说明文字的地方，都必须走这个工厂，不能直接
+    ``QLabel("...**...**...")``。
+    """
+    lbl = QLabel(_md_bold(text), parent)
+    lbl.setObjectName("Dim")
+    lbl.setTextFormat(Qt.TextFormat.RichText)
+    lbl.setWordWrap(True)
+    return lbl
+
+
+#: ``**xxx**`` -> ``<b>xxx</b>``。非配对的 ``**``（比如代码示例里单独
+#: 出现的一对）原样保留——宁可少强调，也不要输出一堆裸星号。
+_RE_MD_BOLD = re.compile(r"\*\*(.+?)\*\*")
+
+
+def _md_bold(text: str) -> str:
+    """把 Markdown 粗体标记换成 HTML 粗体标签。
+
+    先转义 ``&`` / ``<`` / ``>`` 再插标签，否则原文里本来就有尖括号
+    （比如 ``<512``）会被 HTML 解析器当成标签，界面上的文字会莫名其妙
+    少一截。
+    """
+    out = (text.replace("&", "&amp;")
+               .replace("<", "&lt;")
+               .replace(">", "&gt;"))
+    return _RE_MD_BOLD.sub(r"<b>\1</b>", out)
 
 
 # ---------------------------------------------------------------- #

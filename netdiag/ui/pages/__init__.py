@@ -25,6 +25,10 @@ from .mtu_page import MtuPage
 from .netinfo_page import NetInfoPage
 from .ping_page import PingPage
 from .ports_page import PortsPage
+from .portowner_page import PortOwnerPage
+from .route_page import RoutePage
+from .nichealth_page import NicHealthPage
+from .loss_page import LossPage
 from .speed_page import SpeedPage
 from .subnetscan_page import SubnetScanPage
 from .diagnose_page import DiagnosePage
@@ -64,6 +68,10 @@ PAGES: tuple[type[Page], ...] = (
     TracePage,
     DnsPage,
     PortsPage,
+    PortOwnerPage,
+    RoutePage,
+    NicHealthPage,
+    LossPage,
     SpeedPage,
     WifiPage,
     LanPage,
@@ -94,6 +102,10 @@ SIDEBAR: tuple[object, ...] = (
     TracePage,
     DnsPage,
     PortsPage,
+    PortOwnerPage,
+    RoutePage,
+    NicHealthPage,
+    LossPage,
     SpeedPage,
     WifiPage,
     LanPage,
@@ -113,6 +125,7 @@ ALL_PAGES: tuple[type[Page], ...] = PAGES + tuple(
 __all__ = ["PAGES", "GROUPS", "SIDEBAR", "ALL_PAGES", "Page",
            "AboutPage", "ArpPage", "DiagnosePage",
            "DnsPage", "FixPage", "HopMtuPage", "HttpPage", "MultiProbePage", "IpToolPage", "LanPage", "MtuPage",
-           "NetInfoPage", "PingPage", "PortsPage", "SpeedPage",
+           "NetInfoPage", "PingPage", "PortsPage", "PortOwnerPage", "RoutePage", "NicHealthPage", "LossPage",
+           "SpeedPage",
            "SubnetScanPage", "SysDiagPage", "TcpPage", "TracePage",
            "WifiPage"]

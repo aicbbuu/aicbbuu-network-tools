@@ -15,7 +15,7 @@ from ...core import subnetscan
 from ...core.runner import KIND_LINE, KIND_STAT
 from .base import Page
 from .. import theme as T
-from ..widgets import FieldRow
+from ..widgets import FieldRow, note
 
 
 class SubnetScanPage(Page):
@@ -49,7 +49,7 @@ class SubnetScanPage(Page):
         row.addWidget(self.use_icmp)
         lay.addLayout(row)
 
-        tip = QLabel(
+        tip = note(
             "**「ping 通」不等于「有人在用」**，反过来也一样。四种常见情况：\n"
             "  · 设备待机        → ping 通，但没人用（IP 仍被占）\n"
             "  · Windows 防火墙  → ping 不通，但**确实有人在用**\n"
@@ -60,8 +60,8 @@ class SubnetScanPage(Page):
             "Windows），ICMP 只作补充。\n\n"
             "只支持本机直连的子网。跨网段 ARP 看不到，判断会明显变慢且"
             "准确度下降。")
-        tip.setObjectName("Dim")
-        tip.setWordWrap(True)
+        # 说明文字走 note()：它把 **强调** 转成 HTML 粗体。
+        # 直接用 QLabel 会把 ** 原样显示成一串裸露的星号。
         lay.addWidget(tip)
 
     def task(self):

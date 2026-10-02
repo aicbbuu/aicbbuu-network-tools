@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 from ...core import diagnose
 from ...core.runner import KIND_LINE, KIND_STAT
 from .base import Page
+from ..widgets import note
 from .. import theme as T
 
 
@@ -39,7 +40,7 @@ class DiagnosePage(Page):
         row.addStretch(1)
         lay.addLayout(row)
 
-        tip = QLabel(
+        tip = note(
             "诊断按网络协议栈**从底向上**逐层进行，"
             "**第一个异常层就是根本原因**——\n"
             "后面的层失败只是它的表现，而不是另一个问题。\n\n"
@@ -49,8 +50,8 @@ class DiagnosePage(Page):
             "    ④ DNS 解析  域名能不能变成 IP\n"
             "    ⑤ HTTPS     真实发起一次网页请求\n\n"
             "**只做只读检查，不修改任何设置。**")
-        tip.setObjectName("Dim")
-        tip.setWordWrap(True)
+        # 说明文字走 note()：它默认开 RichText，**强调**才会渲染成粗体。
+        # 直接用 QLabel 会把 ** 原样显示出来——v1.0.0 起就有的问题。
         lay.addWidget(tip)
 
     def task(self):

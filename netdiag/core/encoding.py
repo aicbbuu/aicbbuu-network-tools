@@ -11,6 +11,7 @@ Windows 的命令行工具（ping / tracert / nslookup / ipconfig / netstat）
 from __future__ import annotations
 
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -23,7 +24,13 @@ IS_WIN = sys.platform == "win32"
 CANDIDATES = ("utf-8", "gbk", "cp936", "latin-1")
 
 #: 判定「样本足以做决定」所需的字节数
-_SNIFF_BYTES = 512
+#:
+#: 取 512 是拍的，实测不够：netsh winsock catalog 的中文密集段落里，
+#: 512 这个位置刚好把一个 GBK 双字节字符劈成两半（尾部是孤立的
+#: 0xB6），gbk 和 cp936 都会因此抛 UnicodeDecodeError，于是「正确
+#: 的编码」被判成解码失败，一路掉到 latin-1 变成乱码。
+#: 2048 让这种「恰好劈开」的概率大幅下降，且开销可以忽略。
+_SNIFF_BYTES = 2048
 
 #: 全局终止信号。关窗时 set，所有正在跑的子进程都会被 kill。
 #:
@@ -51,25 +58,101 @@ def clear_shutdown() -> None:
     _SHUTDOWN.clear()
 
 
+#: 判定「解出来的是乱码」的阈值。
+#:
+#: latin-1 对任意字节都不会抛UnicodeDecodeError，所以「能解出来」
+#: 根本不构成证据——它会把 GBK 的汉字解成 Ã¿Â¼Ìá 这种东西。
+#: 必须再看**内容**：真正的中文输出里，CJK 字符（U+4E00–U+9FFF）
+#: 会占相当比例；如果解出来全是 Ã、Ä、Â 这类西欧字符，说明选错了
+#: 编码。阈值取 0.2 是实测出来的：GBK 中文 netsh 输出在正确解码下
+#: CJK 占比远高于它，在 latin-1 下则接近 0。
+_CJK = re.compile(r"[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]")
+_MOJIBAKE_HINT = re.compile(r"[\u00c0-\u00ff]")
+
+
+def _looks_like_text(s: str) -> bool:
+    """这段解码结果像正常文本吗？
+
+    两个信号：
+    · CJK 占比——中文输出必须有足量汉字，空空如也说明没解对
+    · 是不是「Ã¿Â¼」这类典型乱码——latin-1 / cp1252 解 GBK 的产物
+    """
+    if not s:
+        return True
+    cjk = len(_CJK.findall(s))
+    if cjk / len(s) >= 0.05:          # 至少 5% 是汉字/全角标点
+        return True
+    # 没有汉字时，只在「看起来像乱码」时才否决——纯英文输出
+    # （tracert 的英文界面）不该被误杀。
+    if _MOJIBAKE_HINT.search(s) and cjk == 0:
+        return False
+    return True
+
+
 def detect_encoding(sample: bytes) -> str:
     """探测一段字节最可能的编码。
 
-    纯本地推理，不联网、不写文件。latin-1 永不失败，所以它一定在
-    候选列表里作为最后的兜底。
+    纯本地推理，不联网、不写文件。
+
+    ** latin-1 不再是「直接兜底」。** 它对任意字节都不会报错，早先
+    直接 return 它，结果 netsh 的 GBK 中文输出（winsock 目录）在
+    UTF-8 探测失败后落到 latin-1，界面显示成「Winsock Ä¿Â¼Ìá¹©³ÌÐòÏî」
+    ——这种「成功解码但内容全错」的情况比抛异常更难查。
+
+    现在的做法：候选逐个试，解出来之后还要**过一道内容检查**
+    （_looks_like_text），全都不像正常文本才退到 latin-1，而 latin-1
+    在这个位置实际上只在纯 ASCII 输入上生效。
     """
     if not sample:
         return "utf-8"
 
+    fallback = CANDIDATES[-1]
+
+    # 采样窗口的末尾可能劈开了��个双字节字符。解码时把它单独剔掉，
+    # 只用于判断、不影响后续按行解码——真正读全文时 run() 拿到的是
+    # 完整字节流，不存在这个问题。
+    probe = sample
     for enc in CANDIDATES[:-1]:
         try:
-            sample.decode(enc)
+            probe.decode(enc)
+            break
+        except UnicodeDecodeError as e:
+            if e.start >= len(sample) - 4:
+                probe = sample[:e.start]
+            else:
+                probe = None
+            break
+    if probe:
+        sample = probe
+
+    # 先在候选里找「解出来像文本」的。这一轮覆盖 UTF-8 和纯 ASCII。
+    for enc in CANDIDATES[:-1]:
+        try:
+            text = sample.decode(enc)
         except UnicodeDecodeError:
             continue
         # 能解出来，但如果是 gbk 解出来的、里面却没有任何高位字节，
         # 说明这段其实是纯 ASCII，utf-8 和 gbk 结果一样，无所谓。
-        return enc
+        if _looks_like_text(text):
+            return enc
 
-    return CANDIDATES[-1]
+    # UTF-8 也不行，才考虑 GBK 家族。
+    #
+    # 单独一轮而不是放进上面的循环：GBK 字节在 UTF-8 下大多非法，
+    # 但**开头是 ASCII 的样本**（netsh winsock catalog 就是——
+    # 「Winsock 目录提供程序项」之前有一行分隔线）会让 UTF-8 侥幸
+    # 成功，而 utf-8 结果里 CJK 占比不够、又没有典型乱码字符，
+    # 刚好卡在 _looks_like_text 的判定边缘上。先让 UTF-8 试完、
+    # 再单独试 GBK，顺序上更符合「这台机器的输出到底是哪种编码」。
+    for enc in ("gbk", "cp936"):
+        try:
+            text = sample.decode(enc)
+        except UnicodeDecodeError:
+            continue
+        if _looks_like_text(text):
+            return enc
+
+    return fallback
 
 
 def iter_lines(

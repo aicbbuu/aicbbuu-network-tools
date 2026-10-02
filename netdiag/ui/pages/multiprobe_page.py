@@ -15,7 +15,7 @@ from ...core import multiprobe
 from ...core.runner import KIND_LINE, KIND_STAT
 from .base import Page
 from .. import theme as T
-from ..widgets import FieldRow, polish_combo
+from ..widgets import FieldRow, note, polish_combo
 
 
 class MultiProbePage(Page):
@@ -82,7 +82,7 @@ class MultiProbePage(Page):
         row1.addStretch(1)
         lay.addLayout(row1)
 
-        tip = QLabel(
+        tip = note(
             "**这一页的价值在「对比」，不在单个结果。**\n\n"
             "    4 个里 3 个通   →  本地网络没问题，是那一个目标自己"
             "的问题\n"
@@ -91,8 +91,8 @@ class MultiProbePage(Page):
             "**并发数有上限是刻意的。** 几百个线程一起建连会触发系统"
             "限流，\n"
             "结果变成「全都连不上」，比不测更误导。")
-        tip.setObjectName("Dim")
-        tip.setWordWrap(True)
+        # 说明文字走 note()：它默认开 RichText，**强调**才会渲染成粗体。
+        # 直接用 QLabel 会把 ** 原样显示出来——v1.0.0 起就有的问题。
         lay.addWidget(tip)
 
         self._load_preset()

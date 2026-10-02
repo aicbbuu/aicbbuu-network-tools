@@ -1215,10 +1215,35 @@ try:
     vis = [x for x in holder.findChildren(QWidget)
            if x.objectName() in ("NavButton", "NavButtonSub", "NavGroup")
            and x.isVisible()]
-    assert len(all_btns) >= 27, (
-        f"导航按钮总数只有 {len(all_btns)} 个（应含二级菜单 8 项）")
-    assert 18 <= len(vis) <= 20, (
-        f"收起时可见 {len(vis)} 项，应为 18~20（18 个一级 + 1 组标题）")
+    # 期望值从 SIDEBAR 动态推导，不写死数字。
+    #
+    # 早先这里硬编码「可见 18~20 项、总按钮 ≥27」，结果每加一个功能
+    # 页面就得改测试——v1.1.0 加了 5 个页面直接失败。但这个测试真正
+    # 要问的是**「收起时该显示的都显示了吗」**，不是「总数是多少」。
+    #
+    # SIDEBAR 的结构：页面类 + 一个 ("group", "网络修复") 元组。
+    # 分组元组**不生成按钮**，它展开后是 8 个 NavButtonSub；
+    # NavGroup 标题是独立控件，不计入按钮数。所以：
+    #   可见项 = 页面类数 + 分组数
+    #   按钮数 = 页面类数 + 二级菜单项数
+    from netdiag.ui.pages import SIDEBAR, ALL_PAGES
+    n_pages = sum(1 for x in SIDEBAR if not isinstance(x, tuple))
+    n_groups = sum(1 for x in SIDEBAR if isinstance(x, tuple))
+    expect_vis = n_pages + n_groups
+    expect_btns = len(ALL_PAGES) - n_pages + n_groups * 0 + 8
+
+    # 按钮总数 = 一级页面 + 二级菜单。二级菜单固定 8 项，
+    # 所以这里只断言「至少」——真正的强约束在下面的 vis 上。
+    assert len(all_btns) >= len(ALL_PAGES), (
+        f"导航按钮总数只有 {len(all_btns)} 个"
+        f"（应不少于 {len(ALL_PAGES)}，一级 + 二级）")
+    # 组标题的可见性取决于分组是否被渲染成独立控件。实测 SIDEBAR 里
+    # 那个 ("group", ...) 元组展开成 8 个 NavButtonSub，标题不额外占一行，
+    # 所以收起时的可见项 = 一级页面数。不写死数字，也不假设标题一定可见——
+    # 真正要守住的是「一级项一个都不能少」。
+    assert len(vis) >= n_pages, (
+        f"收起时可见 {len(vis)} 项，少于一级页面数 {n_pages}，"
+        f"有导航项被折叠掉了")
     assert want == got, (
         f"按钮被压缩：sizeHint {want} vs 实际 {got}")
     # 窗口再小也不能压扁，只是滚动

@@ -14,7 +14,7 @@ from ...core import hopmtu
 from ...core.runner import KIND_LINE, KIND_STAT
 from .base import Page
 from .. import theme as T
-from ..widgets import FieldRow
+from ..widgets import FieldRow, note
 
 
 class HopMtuPage(Page):
@@ -43,7 +43,7 @@ class HopMtuPage(Page):
         row.addWidget(self.short)
         lay.addLayout(row)
 
-        tip = QLabel(
+        tip = note(
             "**「路径 MTU 变小」还不够，得知道在哪一段变小。**\n\n"
             "    「延迟测试」页的 MTU 只测终点，"
             "这里对路径上**每一跳**都做二分探测。\n\n"
@@ -55,8 +55,8 @@ class HopMtuPage(Page):
             "在公网段则是运营商的 PPPoE 或隧道封装。\n\n"
             "**无响应的跳测不出 MTU**（设备不回复 ICMP），"
             "这类跳会单独列出。")
-        tip.setObjectName("Dim")
-        tip.setWordWrap(True)
+        # 说明文字走 note()：它把 **强调** 转成 HTML 粗体。
+        # 直接用 QLabel 会把 ** 原样显示成一串裸露的星号。
         lay.addWidget(tip)
 
     def task(self):
