@@ -74,8 +74,14 @@ class AboutPage(Page):
         head2 = QLabel("源码仓库")
         head2.setObjectName("SubHead")
         lay.addWidget(head2)
-        link = QLabel(REPO_URL)
+        # 必须用富文本 <a href>，纯文本 QLabel 点了没反应。
+        # setOpenExternalLinks(True) + setTextInteractionFlags(
+        # TextBrowserInteraction) 只让 QLabel 识别**富文本里的**链接，
+        # 纯文本 URL 会被当成普通文字——光标变手型、颜色也变了，
+        # 点下去什么都没有。setTextFormat(RichText) 是缺的那一块。
+        link = QLabel(f'<a href="{REPO_URL}">{REPO_URL}</a>')
         link.setObjectName("Link")
+        link.setTextFormat(Qt.TextFormat.RichText)
         link.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextBrowserInteraction)
         link.setOpenExternalLinks(True)

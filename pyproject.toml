@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aicbbuu-network-tools"
-version = "1.0.0"
+version = "1.0.1"
 description = "Windows 桌面网络诊断工具：延迟、路由、DNS、端口、带宽"
 readme = "README.md"
 requires-python = ">=3.10"

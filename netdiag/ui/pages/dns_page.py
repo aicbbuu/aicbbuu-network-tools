@@ -26,7 +26,7 @@ class DnsPage(Page):
     def _build_form(self, lay: QVBoxLayout) -> None:
         row = QHBoxLayout()
         row.setSpacing(T.SPACE_MD)
-        self.host = QLineEdit("localhost")
+        self.host = QLineEdit("baidu.com")
         self.host.setPlaceholderText("要解析的域名，例如 www.baidu.com")
         self.host.setMinimumWidth(280)
         row.addWidget(FieldRow("域名", self.host))

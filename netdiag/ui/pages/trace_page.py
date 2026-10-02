@@ -23,7 +23,7 @@ class TracePage(Page):
         row = QHBoxLayout()
         row.setSpacing(T.SPACE_MD)
 
-        self.host = QLineEdit("www.baidu.com")
+        self.host = QLineEdit("163.com")
         self.host.setPlaceholderText("域名或 IP")
         self.host.setMinimumWidth(260)
         self.hops = QSpinBox()

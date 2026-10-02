@@ -30,7 +30,7 @@ class HopMtuPage(Page):
     def _build_form(self, lay: QVBoxLayout) -> None:
         row = QHBoxLayout()
         row.setSpacing(T.SPACE_MD)
-        self.host = QLineEdit("8.8.8.8")
+        self.host = QLineEdit("qq.com")
         self.host.setPlaceholderText("目标主机或 IP")
         self.host.setMinimumWidth(220)
         row.addWidget(FieldRow("目标", self.host))
@@ -62,7 +62,7 @@ class HopMtuPage(Page):
     def task(self):
         host = self.host.text().strip()
         if not host:
-            raise ValueError("请填写目标主机，例如 8.8.8.8")
+            raise ValueError("请填写目标主机，例如 qq.com")
         hops = 6 if self.short.isChecked() else 15
         return (lambda post: hopmtu.hop_mtu_scan(post, host, max_hops=hops),
                 f"正在逐跳探测 {host} 的 MTU（最多 {hops} 跳）…")

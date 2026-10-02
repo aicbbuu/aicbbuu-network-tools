@@ -14,7 +14,7 @@
 
 #define AppName        "aicbbuu network tools"
 #define AppNameCn      "aicbbuu 网络工具"
-#define AppVersion     "1.0.0"
+#define AppVersion     "1.0.1"
 #define AppPublisher   "aicbbuu"
 #define AppExeName     "aicbbuu-network-tools.exe"
 #define AppId          "{{6B2E9A1C-4F3D-4E7A-9C15-8D2F6B0A7E31}"

@@ -32,7 +32,7 @@ class TcpPage(Page):
     def _build_form(self, lay: QVBoxLayout) -> None:
         row = QHBoxLayout()
         row.setSpacing(T.SPACE_MD)
-        self.host = QLineEdit("localhost")
+        self.host = QLineEdit("163.com")
         self.host.setPlaceholderText("域名，例如 www.baidu.com")
         self.host.setMinimumWidth(260)
         self.port = QLineEdit("443")

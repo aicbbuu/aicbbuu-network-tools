@@ -10,6 +10,7 @@ from __future__ import annotations
 from PySide6.QtWidgets import QHBoxLayout, QLineEdit, QVBoxLayout
 
 from ...core import probes_ext
+from ...core.probes_ext import DEFAULT_HTTP_TARGETS
 from ...core.runner import KIND_LINE, KIND_STAT
 from .base import Page
 from .. import theme as T
@@ -30,7 +31,9 @@ class HttpPage(Page):
         row = QHBoxLayout()
         row.setSpacing(T.SPACE_MD)
         self.host = QLineEdit("")
-        self.host.setPlaceholderText("留空则自动测三个站点；也可填域名或 IP")
+        self.host.setPlaceholderText(
+            "留空则自动测 " + "、".join(DEFAULT_HTTP_TARGETS)
+            + "；也可填域名或 IP")
         self.host.setMinimumWidth(280)
         row.addWidget(FieldRow("目标", self.host))
         row.addStretch(1)

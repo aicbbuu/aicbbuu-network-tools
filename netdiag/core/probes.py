@@ -17,7 +17,8 @@ from .runner import KIND_ERROR, KIND_LINE, KIND_STAT, Post
 
 
 __all__ = [
-    "ping", "traceroute", "dns_lookup", "port_scan", "bandwidth_test", "network_info",
+    "ping", "tcping", "traceroute", "dns_lookup", "port_scan",
+    "bandwidth_test", "network_info",
     "COMMON_PORTS", "parse_ports", "ping_summary",
 ]
 
@@ -90,6 +91,63 @@ def ping_summary(
         "all_failed": all_failed,
     }
     return out
+
+
+# ================================================================== #
+#  TCP 延迟（tcping）
+# ================================================================== #
+def tcping(post: Post, host: str, port: int = 443, count: int = 4,
+           timeout: float = 3.0) -> None:
+    """TCP 握手延迟测试（tcping）。
+
+    为什么要有这个：ICMP 常被企业网络 / VPN / 云主机在协议层丢弃，
+    「ping 不通但网页能开」是常态，icmp 测不出这类网络到底快不快。
+    TCP 握手走的是真实业务路径（同样的端口、同样的中间设备），
+    ICMP 被封时它照样测得出延迟。
+
+    「端口通不通」和「延迟多少」是两件事，所以这里逐次报告状态：
+    一次 connect() 成功说明该次握手成功，耗时即 RTT（不含应用层）。
+    """
+    if not host:
+        post(KIND_ERROR, "请填写目标主机")
+        return
+
+    name = host.strip()
+    try:
+        ip = socket.gethostbyname(name)
+    except socket.gaierror as e:
+        post(KIND_ERROR, f"DNS 解析失败：{name} -> {e.strerror or e}")
+        return
+
+    post(KIND_LINE, f"目标：{name}:{port}  ({ip})  TCP 握手 {count} 次")
+    post(KIND_LINE, "")
+
+    rtts: list[int] = []
+    for i in range(1, max(1, count) + 1):
+        t0 = time.perf_counter()
+        try:
+            with socket.create_connection((ip, port), timeout=timeout):
+                ms = (time.perf_counter() - t0) * 1000
+        except OSError as e:
+            # 超时和「连接被拒」含义完全不同：前者多半是丢包/被过滤，
+            # 后者是端口没开或被防火墙 RST。分开说，不然用户会误判。
+            reason = "超时" if isinstance(e, socket.timeout) else \
+                f"连接失败（{type(e).__name__}）"
+            post(KIND_LINE, f"  第 {i} 次  {reason}"
+                            f"  {port} 端口未响应")
+            continue
+
+        ms_i = max(0, int(round(ms)))
+        rtts.append(ms_i)
+        post(KIND_LINE, f"  第 {i} 次  握手成功  {ms_i} ms")
+
+    if rtts:
+        post(KIND_STAT, ping_summary(rtts, max(1, count)))
+    else:
+        post(KIND_STAT, ping_summary([], max(1, count), all_failed=True))
+        post(KIND_LINE, "")
+        post(KIND_LINE, f"{count} 次都没能完成 TCP 握手。"
+                        f"可能是端口没开、被防火墙拦，或该地址不回应此端口。")
 
 
 def _jitter(rtts: list[int]) -> float | None:

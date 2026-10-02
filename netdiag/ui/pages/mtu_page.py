@@ -28,8 +28,8 @@ class MtuPage(Page):
     def _build_form(self, lay: QVBoxLayout) -> None:
         row = QHBoxLayout()
         row.setSpacing(T.SPACE_MD)
-        self.host = QLineEdit("www.baidu.com")
-        self.host.setPlaceholderText("域名或 IP，例如 www.baidu.com")
+        self.host = QLineEdit("qq.com")
+        self.host.setPlaceholderText("域名或 IP，例如 qq.com")
         self.host.setMinimumWidth(280)
         row.addWidget(FieldRow("目标主机", self.host))
         row.addStretch(1)
